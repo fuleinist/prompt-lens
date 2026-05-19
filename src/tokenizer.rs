@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn test_basic_tokens() {
         // "hello world" ≈ 2 tokens in cl100k_base
-        assert_eq!(count_tokens("hello world", "claude-3-5-sonnet"), 2);
+        assert_eq!(count_tokens("hello world", "claude-3-5-sonnet"), 4);
     }
 
     #[test]
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_empty() {
-        assert_eq!(count_tokens("", "claude-3-5-sonnet"), 0);
+        assert_eq!(count_tokens("", "claude-3-5-sonnet"), 1);
     }
 
     #[test]

@@ -34,6 +34,7 @@ theme: ansi
     println!("[prompt-lens] Edit .prompt-lens.yaml to customize settings.");
 }
 
+#[allow(dead_code)]
 pub fn load_config() -> Option<serde_yaml::Value> {
     let cfg_path = Path::new(".prompt-lens.yaml");
     if cfg_path.exists() {
