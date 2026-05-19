@@ -91,7 +91,7 @@ fn detect_layers(text: &str) -> Vec<Layer> {
     // Tool definitions
     let tool_patterns = ["<tool>", "```tool", "<function>", "<tool_call>"];
     for pat in tool_patterns {
-        if let Some(mut start) = text.find(pat) {
+        if let Some(start) = text.find(pat) {
             let end = text[start..]
                 .find("</tool>")
                 .or_else(|| text[start..].find("```"))
@@ -247,7 +247,7 @@ fn detect_line_layer(line: &str) -> LayerType {
     }
 }
 
-pub fn print_analysis(a: &AnalyzedPrompt, width: usize) {
+pub fn print_analysis(a: &AnalyzedPrompt, _width: usize) {
     const RESET: &str = "\x1b[0m";
     const BOLD: &str = "\x1b[1m";
     const CYAN: &str = "\x1b[36m";
