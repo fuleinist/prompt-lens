@@ -1,5 +1,7 @@
 //! Optimizer — suggest token-saving transformations.
 
+use regex::Regex;
+
 use crate::tokenizer::count_tokens;
 use crate::analyzer::AnalyzedPrompt;
 
@@ -197,7 +199,48 @@ pub fn print_suggestions(text: &str, suggestions: &[Suggestion], apply: bool, _w
 fn apply_suggestions(text: &str, suggestions: &[Suggestion]) -> String {
     let mut result = text.to_string();
     for sug in suggestions {
-        result = result.replace(&sug.pattern, "");
+        // Use case-insensitive regex for reliable replacement
+        if let Ok(re) = Regex::new(&format!(r"(?i){}", regex::escape(&sug.pattern))) {
+            result = re.replace_all(&result, "").to_string();
+        } else {
+            // Fallback to simple replace
+            result = result.replace(&sug.pattern, "");
+        }
     }
     result.trim().to_string()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_apply_suggestions_case_insensitive() {
+        // Test that "Please kindly" gets replaced even when capitalized
+        let text = "Please kindly assist me with this task.";
+        let suggestions = vec![Suggestion {
+            description: "Replace polite phrase".to_string(),
+            before_tokens: 3,
+            after_tokens: 1,
+            location: "text-wide".to_string(),
+            pattern: "please kindly".to_string(),
+        }];
+        let result = apply_suggestions(text, &suggestions);
+        assert!(!result.contains("Please kindly"), "Should replace 'Please kindly' case-insensitively");
+        assert!(result.contains("assist me"), "Should preserve remaining content");
+    }
+
+    #[test]
+    fn test_apply_suggestions_preserves_remaining() {
+        let text = "Could you please help me with this task";
+        let suggestions = vec![Suggestion {
+            description: "Replace verbose phrase".to_string(),
+            before_tokens: 4,
+            after_tokens: 2,
+            location: "text-wide".to_string(),
+            pattern: "could you please".to_string(),
+        }];
+        let result = apply_suggestions(text, &suggestions);
+        assert!(!result.contains("Could you please"), "Should replace the phrase");
+        assert!(result.contains("help me"), "Should preserve remaining");
+    }
 }
