@@ -77,13 +77,21 @@ enum Commands {
 
     /// Compare two prompts: side-by-side diff with token delta
     Diff {
-        /// First prompt
+        /// First prompt (use --file1 to read from file instead)
         #[arg(allow_hyphen_values = true)]
-        prompt1: String,
+        prompt1: Option<String>,
 
-        /// Second prompt
+        /// Second prompt (use --file2 to read from file instead)
         #[arg(allow_hyphen_values = true)]
-        prompt2: String,
+        prompt2: Option<String>,
+
+        /// Read first prompt from file
+        #[arg(short = 'f', long = "file1")]
+        file1: Option<String>,
+
+        /// Read second prompt from file
+        #[arg(long = "file2")]
+        file2: Option<String>,
 
         /// Output as JSON
         #[arg(short, long)]
@@ -166,8 +174,18 @@ fn main() {
             }
         }
 
-        Some(Commands::Diff { prompt1, prompt2, json }) => {
-            let diff = diff::diff_prompts(&prompt1, &prompt2);
+        Some(Commands::Diff { prompt1, prompt2, file1, file2, json }) => {
+            let text1 = read_prompt(prompt1, file1);
+            let text2 = read_prompt(prompt2, file2);
+            if text1.is_empty() {
+                eprintln!("Error: no content for prompt1. Use argument, --file1, or pipe stdin.");
+                std::process::exit(1);
+            }
+            if text2.is_empty() {
+                eprintln!("Error: no content for prompt2. Use argument, --file2, or pipe stdin.");
+                std::process::exit(1);
+            }
+            let diff = diff::diff_prompts(&text1, &text2);
             if json {
                 println!("{}", serde_json::to_string_pretty(&diff).unwrap());
             } else {
