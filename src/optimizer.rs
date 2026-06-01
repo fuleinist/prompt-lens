@@ -12,6 +12,10 @@ pub struct Suggestion {
     pub after_tokens: usize,
     pub location: String,
     pub pattern: String,
+    /// String to substitute for `pattern` when applying. `None` means
+    /// delete the matched text (used for duplicate-line / long-header /
+    /// example-block suggestions where the user just wants the noise gone).
+    pub replacement: Option<String>,
 }
 
 pub fn suggest(text: &str, _analysis: &AnalyzedPrompt) -> Vec<Suggestion> {
@@ -49,6 +53,7 @@ pub fn suggest(text: &str, _analysis: &AnalyzedPrompt) -> Vec<Suggestion> {
                     after_tokens: after,
                     location: "text-wide".to_string(),
                     pattern: verbose.to_string(),
+                    replacement: Some(concise.to_string()),
                 });
             }
         }
@@ -72,6 +77,7 @@ pub fn suggest(text: &str, _analysis: &AnalyzedPrompt) -> Vec<Suggestion> {
                 after_tokens: 0,
                 location: format!("line {}", i + 1),
                 pattern: lines[i].trim().to_string(),
+                replacement: None,
             });
         }
         i += 1;
@@ -92,6 +98,7 @@ pub fn suggest(text: &str, _analysis: &AnalyzedPrompt) -> Vec<Suggestion> {
                         after_tokens: count_tokens(header_text, "claude-3-5-sonnet"),
                         location: format!("line {}: \"{}\"", lines.iter().position(|l| *l == *line).unwrap_or(0) + 1, &trimmed[..20.min(trimmed.len())]),
                         pattern: trimmed.to_string(),
+                        replacement: None,
                     });
                 }
             }
@@ -108,6 +115,7 @@ pub fn suggest(text: &str, _analysis: &AnalyzedPrompt) -> Vec<Suggestion> {
             after_tokens: 30, // Just the path reference
             location: format!("chars {}-{}", start, end),
             pattern: "example_block".to_string(),
+            replacement: None,
         });
     }
 
@@ -199,12 +207,13 @@ pub fn print_suggestions(text: &str, suggestions: &[Suggestion], apply: bool, _w
 fn apply_suggestions(text: &str, suggestions: &[Suggestion]) -> String {
     let mut result = text.to_string();
     for sug in suggestions {
+        let replacement = sug.replacement.as_deref().unwrap_or("");
         // Use case-insensitive regex for reliable replacement
         if let Ok(re) = Regex::new(&format!(r"(?i){}", regex::escape(&sug.pattern))) {
-            result = re.replace_all(&result, "").to_string();
+            result = re.replace_all(&result, replacement).to_string();
         } else {
             // Fallback to simple replace
-            result = result.replace(&sug.pattern, "");
+            result = result.replace(&sug.pattern, replacement);
         }
     }
     result.trim().to_string()
@@ -223,6 +232,7 @@ mod tests {
             after_tokens: 1,
             location: "text-wide".to_string(),
             pattern: "please kindly".to_string(),
+            replacement: Some("please".to_string()),
         }];
         let result = apply_suggestions(text, &suggestions);
         assert!(!result.contains("Please kindly"), "Should replace 'Please kindly' case-insensitively");
@@ -238,9 +248,48 @@ mod tests {
             after_tokens: 2,
             location: "text-wide".to_string(),
             pattern: "could you please".to_string(),
+            replacement: Some("please".to_string()),
         }];
         let result = apply_suggestions(text, &suggestions);
         assert!(!result.contains("Could you please"), "Should replace the phrase");
         assert!(result.contains("help me"), "Should preserve remaining");
+    }
+
+    #[test]
+    fn test_apply_suggestions_replaces_with_concise_form() {
+        // Polite phrase suggestions must substitute the concise form,
+        // not delete the verbose phrase entirely. Previously, "Please
+        // kindly" was replaced with "" so the resulting prompt lost
+        // the intended meaning ("Please assist me" -> "assist me").
+        let text = "Please kindly help me with this task.";
+        let suggestions = vec![Suggestion {
+            description: "Replace polite phrase".to_string(),
+            before_tokens: 3,
+            after_tokens: 1,
+            location: "text-wide".to_string(),
+            pattern: "please kindly".to_string(),
+            replacement: Some("please".to_string()),
+        }];
+        let result = apply_suggestions(text, &suggestions);
+        assert!(result.contains("please help me"), "Should keep the concise form 'please' in place of 'Please kindly'");
+        assert!(!result.contains("kindly"), "Should remove the verbose word 'kindly'");
+    }
+
+    #[test]
+    fn test_apply_suggestions_none_replacement_deletes() {
+        // Suggestions with replacement: None should delete the pattern
+        // (used for duplicate-line / long-header / example-block noise).
+        let text = "keep this. delete_me. end.";
+        let suggestions = vec![Suggestion {
+            description: "Remove noise".to_string(),
+            before_tokens: 1,
+            after_tokens: 0,
+            location: "text-wide".to_string(),
+            pattern: "delete_me".to_string(),
+            replacement: None,
+        }];
+        let result = apply_suggestions(text, &suggestions);
+        assert_eq!(result, "keep this. . end.");
+        assert!(!result.contains("delete_me"));
     }
 }
