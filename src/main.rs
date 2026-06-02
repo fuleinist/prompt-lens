@@ -19,13 +19,22 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Model for cost calculation: claude-3-5-sonnet, gpt-4o, gpt-3.5-turbo
-    #[arg(long, default_value = "claude-3-5-sonnet")]
-    model: String,
+    /// Model for cost calculation: claude-3-5-sonnet, gpt-4o, gpt-3.5-turbo.
+    /// Falls back to `default_model` in `.prompt-lens.yaml` when omitted.
+    #[arg(long)]
+    model: Option<String>,
 
     /// Maximum characters per line in output
     #[arg(long, default_value_t = 80)]
     width: usize,
+}
+
+/// Resolve the model to use: explicit `--model` flag wins, then
+/// `default_model` from `.prompt-lens.yaml`, then the built-in fallback.
+fn resolve_model(explicit: Option<String>) -> String {
+    explicit
+        .or_else(config::default_model_from_config)
+        .unwrap_or_else(|| "claude-3-5-sonnet".to_string())
 }
 
 #[derive(Subcommand)]
@@ -131,6 +140,7 @@ fn get_prompt_text(raw: String) -> String {
 
 fn main() {
     let cli = Cli::parse();
+    let model = resolve_model(cli.model);
 
     match cli.command {
         Some(Commands::Analyze { prompt, file, json }) => {
@@ -140,7 +150,7 @@ fn main() {
                 eprintln!("Error: no content to analyze");
                 std::process::exit(1);
             }
-            let analysis = analyzer::analyze(&text, &cli.model);
+            let analysis = analyzer::analyze(&text, &model);
             if json {
                 println!("{}", serde_json::to_string_pretty(&analysis).unwrap());
             } else {
@@ -165,7 +175,7 @@ fn main() {
                 eprintln!("Error: no content to optimize");
                 std::process::exit(1);
             }
-            let analysis = analyzer::analyze(&text, &cli.model);
+            let analysis = analyzer::analyze(&text, &model);
             let suggestions = optimizer::suggest(&text, &analysis);
             if json {
                 println!("{}", serde_json::to_string_pretty(&suggestions).unwrap());
@@ -205,7 +215,7 @@ fn main() {
             if text.is_empty() {
                 Cli::parse();
             } else {
-                let analysis = analyzer::analyze(text, &cli.model);
+                let analysis = analyzer::analyze(text, &model);
                 analyzer::print_analysis(&analysis, cli.width);
             }
         }
