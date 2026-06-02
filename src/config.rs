@@ -36,11 +36,79 @@ theme: ansi
 
 #[allow(dead_code)]
 pub fn load_config() -> Option<serde_yaml::Value> {
-    let cfg_path = Path::new(".prompt-lens.yaml");
-    if cfg_path.exists() {
-        let content = std::fs::read_to_string(cfg_path).ok()?;
+    load_config_from(Path::new(".prompt-lens.yaml"))
+}
+
+pub fn load_config_from(path: &Path) -> Option<serde_yaml::Value> {
+    if path.exists() {
+        let content = std::fs::read_to_string(path).ok()?;
         serde_yaml::from_str(&content).ok()
     } else {
         None
+    }
+}
+
+/// Read `default_model` from `.prompt-lens.yaml` in the current directory.
+/// Returns `None` if the file is missing, unreadable, malformed, or the
+/// key is absent.
+pub fn default_model_from_config() -> Option<String> {
+    default_model_from_config_path(Path::new(".prompt-lens.yaml"))
+}
+
+pub fn default_model_from_config_path(path: &Path) -> Option<String> {
+    load_config_from(path)
+        .as_ref()
+        .and_then(|c| c.get("default_model"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Each test gets its own subdirectory under the temp dir so they can
+    // run in parallel without trampling each other's files.
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn write_temp_config(content: &str) -> std::path::PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("prompt-lens-config-test-{n}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".prompt-lens.yaml");
+        fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_default_model_from_config_path_reads_value() {
+        let path = write_temp_config("default_model: gpt-4o\n");
+        assert_eq!(
+            default_model_from_config_path(&path).as_deref(),
+            Some("gpt-4o")
+        );
+    }
+
+    #[test]
+    fn test_default_model_from_config_path_missing_key() {
+        let path = write_temp_config("theme: ansi\n");
+        assert_eq!(default_model_from_config_path(&path), None);
+    }
+
+    #[test]
+    fn test_default_model_from_config_path_missing_file() {
+        let path = std::env::temp_dir()
+            .join("prompt-lens-config-test-missing-explicit")
+            .join(".prompt-lens.yaml");
+        assert_eq!(default_model_from_config_path(&path), None);
+    }
+
+    #[test]
+    fn test_default_model_from_config_path_malformed_yaml() {
+        let path = write_temp_config("default_model: : : not valid yaml\n");
+        assert_eq!(default_model_from_config_path(&path), None);
     }
 }
