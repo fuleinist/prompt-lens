@@ -179,6 +179,18 @@ fn find_costly_sections(
     costly
 }
 
+/// Return the largest byte index `<= max_bytes` that ends a complete
+/// char (i.e. a valid char boundary), so `&s[..result]` is a whole-char
+/// prefix whose byte length does not exceed `max_bytes`.
+fn safe_floor(s: &str, max_bytes: usize) -> usize {
+    s.char_indices()
+        .map(|(i, c)| (i, i + c.len_utf8()))
+        .take_while(|&(_, end)| end <= max_bytes)
+        .last()
+        .map(|(_, end)| end)
+        .unwrap_or(0)
+}
+
 pub fn visualize(text: &str, width: usize) {
     // Color output using ANSI codes
     // Cyan = system, Green = user, Yellow = assistant, Magenta = tool
@@ -206,19 +218,31 @@ pub fn visualize(text: &str, width: usize) {
         let prefix = format!("{}[{:2}] ", color, i + 1);
         print!("{}", prefix);
 
-        // Wrap long lines
-        if line.len() > width - 5 {
+        // Wrap long lines. The wrap budget is `width - 5` to leave room
+        // for the `[NN] ` line prefix; we slice on a safe UTF-8 char
+        // boundary, not a raw byte index, so non-ASCII lines don't panic.
+        let budget = width.saturating_sub(5);
+        if line.len() > budget {
             let mut remaining = line;
             let indent = "       ";
-            while !remaining.is_empty() {
-                if remaining.len() <= width - 5 {
-                    println!("{}{}{}", color, remaining, RESET);
-                    break;
+            while remaining.len() > budget {
+                let cut_at = safe_floor(remaining, budget);
+                if cut_at == 0 {
+                    // Defensive: budget is smaller than a single char's UTF-8
+                    // width. Emit one whole char on its own line so the loop
+                    // always makes forward progress.
+                    let c = remaining.chars().next().unwrap();
+                    println!("{}{}{}", color, c, RESET);
+                    remaining = &remaining[c.len_utf8()..];
+                } else {
+                    let cut = &remaining[..cut_at];
+                    println!("{}{}", color, cut);
+                    remaining = &remaining[cut_at..];
                 }
-                let cut = &remaining[..width - 5];
-                println!("{}{}", color, cut);
-                remaining = &remaining[cut.len()..];
                 print!("{}", indent);
+            }
+            if !remaining.is_empty() {
+                println!("{}{}{}", color, remaining, RESET);
             }
         } else {
             println!("{}{}{}", color, line, RESET);
@@ -307,4 +331,48 @@ pub fn print_analysis(a: &AnalyzedPrompt, _width: usize) {
     }
 
     println!("  {CYAN}╚══{RESET} {BOLD}Total: {} tokens | ${:.4}{RESET}", a.tokens, a.cost);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_safe_floor_ascii_unchanged() {
+        // ASCII only: every char is one byte, so safe_floor is just
+        // the min of max_bytes and the string length.
+        assert_eq!(safe_floor("hello world", 5), 5);
+        assert_eq!(safe_floor("hello world", 100), 11);
+    }
+
+    #[test]
+    fn test_safe_floor_unicode_walks_back_to_boundary() {
+        // 5× 'é' = 10 bytes, all multi-byte. Asking for a cut at byte 7
+        // must walk back to 6 (end of the 3rd 'é') so the slice is whole
+        // chars and does not panic.
+        let s = "ééééé"; // bytes: [é0..2, é2..4, é4..6, é6..8, é8..10]
+        assert_eq!(safe_floor(s, 7), 6);
+        assert_eq!(safe_floor(s, 0), 0);
+        assert_eq!(safe_floor(s, 100), s.len());
+    }
+
+    #[test]
+    fn test_visualize_does_not_panic_on_long_unicode_line() {
+        // Regression: visualizing a long line of multi-byte chars used to
+        // panic with "byte index 75 is not a char boundary" because the
+        // wrap loop sliced on raw byte indices.
+        let text = "é".repeat(200);
+        visualize(&text, 80);
+    }
+
+    #[test]
+    fn test_visualize_does_not_panic_on_mixed_ascii_and_unicode() {
+        // 70 ASCII chars puts the line just over the wrap budget; the next
+        // char is a 2-byte 'é' so the original byte-75 cut would split
+        // inside it.
+        let mut text = "a".repeat(70);
+        text.push('é');
+        text.push_str(&"b".repeat(200));
+        visualize(&text, 80);
+    }
 }
