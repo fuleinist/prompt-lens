@@ -83,26 +83,35 @@ pub fn suggest(text: &str, _analysis: &AnalyzedPrompt) -> Vec<Suggestion> {
         i += 1;
     }
 
-    // 3. Shorten markdown headers
-    for line in &lines {
+    // 3. Shorten markdown headers — suggest shortening headers whose
+    //    visible text content (after stripping leading `#` markers and
+    //    whitespace) exceeds 30 characters.
+    //
+    //    The previous version measured `trimmed.len() > 30` and computed
+    //    `excess = trimmed.len() - header_text.len() - 30`, which under-
+    //    flowed for any long header (`excess` became a huge `usize`) and
+    //    produced nonsensical output like "Shorten header (18446744073709551589
+    //    chars over limit)". It also used `lines.iter().position(...)` to
+    //    find the header's line number, which is O(n) per header and can
+    //    report the wrong index when a duplicate line exists.
+    for (idx, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        if trimmed.starts_with('#') && trimmed.len() > 30 {
-            let header_text = trimmed.trim_start_matches('#').trim();
-            let excess = trimmed.len() - header_text.len() - 30;
-            if excess > 0 {
-                let surplus = header_text.len() - (header_text.len().saturating_sub(excess));
-                if surplus > 5 {
-                    suggestions.push(Suggestion {
-                        description: format!("Shorten header ({} chars over limit)", excess),
-                        before_tokens: count_tokens(trimmed, "claude-3-5-sonnet"),
-                        after_tokens: count_tokens(header_text, "claude-3-5-sonnet"),
-                        location: format!("line {}: \"{}\"", lines.iter().position(|l| *l == *line).unwrap_or(0) + 1, &trimmed[..20.min(trimmed.len())]),
-                        pattern: trimmed.to_string(),
-                        replacement: None,
-                    });
-                }
-            }
+        if !trimmed.starts_with('#') {
+            continue;
         }
+        let header_text = trimmed.trim_start_matches('#').trim();
+        if header_text.len() <= 30 {
+            continue;
+        }
+        let excess = header_text.len() - 30;
+        suggestions.push(Suggestion {
+            description: format!("Shorten header ({} chars over limit)", excess),
+            before_tokens: count_tokens(trimmed, "claude-3-5-sonnet"),
+            after_tokens: count_tokens(header_text, "claude-3-5-sonnet"),
+            location: format!("line {}: \"{}\"", idx + 1, &trimmed[..20.min(trimmed.len())]),
+            pattern: trimmed.to_string(),
+            replacement: None,
+        });
     }
 
     // 4. Suggest moving long examples to files
@@ -291,5 +300,59 @@ mod tests {
         let result = apply_suggestions(text, &suggestions);
         assert_eq!(result, "keep this. . end.");
         assert!(!result.contains("delete_me"));
+    }
+
+    fn header_suggestion_for(text: &str) -> Option<Suggestion> {
+        let analysis = crate::analyzer::analyze(text, "claude-3-5-sonnet");
+        suggest(text, &analysis)
+            .into_iter()
+            .find(|s| s.description.starts_with("Shorten header"))
+    }
+
+    #[test]
+    fn test_header_shortening_detects_long_header_with_correct_excess() {
+        // Header text is 55 chars, 25 over the 30-char limit.
+        // The previous bug reported "18446744073709551589 chars over limit"
+        // (usize underflow). Now it should report 25 and use the real line
+        // number from the iteration, not an O(n) position search.
+        let text = "## This is a long markdown header that should be shortened\nbody text";
+        let sug = header_suggestion_for(text).expect("should suggest shortening");
+        assert!(
+            sug.description.contains("25 chars over limit"),
+            "expected 25-char excess in description, got: {}",
+            sug.description
+        );
+        assert!(
+            sug.description.contains("Shorten header"),
+            "wrong description: {}",
+            sug.description
+        );
+        assert!(sug.location.starts_with("line 1: "), "wrong location: {}", sug.location);
+    }
+
+    #[test]
+    fn test_header_shortening_ignores_short_headers() {
+        // Header text is under the 30-char limit; no suggestion.
+        let text = "## Short header\nbody";
+        assert!(header_suggestion_for(text).is_none());
+    }
+
+    #[test]
+    fn test_header_shortening_uses_correct_line_for_duplicate_header_lines() {
+        // Two headers with the same text content. The previous code used
+        // `lines.iter().position(|l| *l == *line)`, which always returns
+        // the first match — so the second header was reported as "line 1".
+        // With `enumerate()` the second header is now correctly "line 2".
+        let text = "## This is a long markdown header that should be shortened\n\
+                    ## This is a long markdown header that should be shortened\n\
+                    body";
+        let analysis = crate::analyzer::analyze(text, "claude-3-5-sonnet");
+        let header_suggestions: Vec<_> = suggest(text, &analysis)
+            .into_iter()
+            .filter(|s| s.description.starts_with("Shorten header"))
+            .collect();
+        assert_eq!(header_suggestions.len(), 2, "expected 2 suggestions");
+        assert!(header_suggestions[0].location.starts_with("line 1: "));
+        assert!(header_suggestions[1].location.starts_with("line 2: "));
     }
 }
