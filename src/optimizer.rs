@@ -16,6 +16,11 @@ pub struct Suggestion {
     /// delete the matched text (used for duplicate-line / long-header /
     /// example-block suggestions where the user just wants the noise gone).
     pub replacement: Option<String>,
+    /// Number of occurrences to remove when `replacement` is `None`.
+    /// `None` (or 1) deletes only the first match; some passes
+    /// (e.g. consecutive duplicate lines) need to delete N-1 matches so
+    /// one copy remains.
+    pub delete_count: Option<usize>,
 }
 
 pub fn suggest(text: &str, _analysis: &AnalyzedPrompt) -> Vec<Suggestion> {
@@ -54,6 +59,7 @@ pub fn suggest(text: &str, _analysis: &AnalyzedPrompt) -> Vec<Suggestion> {
                     location: "text-wide".to_string(),
                     pattern: verbose.to_string(),
                     replacement: Some(concise.to_string()),
+                    delete_count: None,
                 });
             }
         }
@@ -78,7 +84,18 @@ pub fn suggest(text: &str, _analysis: &AnalyzedPrompt) -> Vec<Suggestion> {
                 location: format!("line {}", i + 1),
                 pattern: lines[i].trim().to_string(),
                 replacement: None,
+                // Keep one copy: remove exactly N-1 of the N consecutive
+                // matches. `apply_suggestions` uses this to avoid the old
+                // `replace_all` bug that deleted every copy (including the
+                // one the user wanted to keep).
+                delete_count: Some(removed),
             });
+            // Skip past the whole run of duplicates; otherwise the next
+            // iteration would re-detect the same run and emit a second
+            // suggestion that, applied alongside the first, deletes
+            // every copy (defeating the "keep one" intent).
+            i = j;
+            continue;
         }
         i += 1;
     }
@@ -111,6 +128,7 @@ pub fn suggest(text: &str, _analysis: &AnalyzedPrompt) -> Vec<Suggestion> {
             location: format!("line {}: \"{}\"", idx + 1, &trimmed[..20.min(trimmed.len())]),
             pattern: trimmed.to_string(),
             replacement: None,
+            delete_count: Some(1),
         });
     }
 
@@ -125,6 +143,7 @@ pub fn suggest(text: &str, _analysis: &AnalyzedPrompt) -> Vec<Suggestion> {
             location: format!("chars {}-{}", start, end),
             pattern: "example_block".to_string(),
             replacement: None,
+            delete_count: Some(1),
         });
     }
 
@@ -216,13 +235,35 @@ pub fn print_suggestions(text: &str, suggestions: &[Suggestion], apply: bool, _w
 fn apply_suggestions(text: &str, suggestions: &[Suggestion]) -> String {
     let mut result = text.to_string();
     for sug in suggestions {
-        let replacement = sug.replacement.as_deref().unwrap_or("");
         // Use case-insensitive regex for reliable replacement
         if let Ok(re) = Regex::new(&format!(r"(?i){}", regex::escape(&sug.pattern))) {
-            result = re.replace_all(&result, replacement).to_string();
+            match sug.replacement.as_deref() {
+                // Explicit replacement (e.g. polite-phrase rewrites) applies
+                // to every occurrence.
+                Some(r) => {
+                    result = re.replace_all(&result, r).to_string();
+                }
+                // `replacement: None` means "delete this". Each suggestion
+                // describes a single span of noise, so default to deleting
+                // only the first match — using `replace_all` here would
+                // also strip user content that the suggestion never
+                // intended to touch (e.g. the one copy of a duplicate
+                // line that the suggestion wants to keep).
+                None => {
+                    let count = sug.delete_count.unwrap_or(1);
+                    for _ in 0..count {
+                        let next = re.replace(&result, "").to_string();
+                        if next == result {
+                            break;
+                        }
+                        result = next;
+                    }
+                }
+            }
+        } else if let Some(r) = sug.replacement.as_deref() {
+            result = result.replace(&sug.pattern, r);
         } else {
-            // Fallback to simple replace
-            result = result.replace(&sug.pattern, replacement);
+            result = result.replace(&sug.pattern, "");
         }
     }
     result.trim().to_string()
@@ -242,6 +283,7 @@ mod tests {
             location: "text-wide".to_string(),
             pattern: "please kindly".to_string(),
             replacement: Some("please".to_string()),
+            delete_count: None,
         }];
         let result = apply_suggestions(text, &suggestions);
         assert!(!result.contains("Please kindly"), "Should replace 'Please kindly' case-insensitively");
@@ -258,6 +300,7 @@ mod tests {
             location: "text-wide".to_string(),
             pattern: "could you please".to_string(),
             replacement: Some("please".to_string()),
+            delete_count: None,
         }];
         let result = apply_suggestions(text, &suggestions);
         assert!(!result.contains("Could you please"), "Should replace the phrase");
@@ -278,6 +321,7 @@ mod tests {
             location: "text-wide".to_string(),
             pattern: "please kindly".to_string(),
             replacement: Some("please".to_string()),
+            delete_count: None,
         }];
         let result = apply_suggestions(text, &suggestions);
         assert!(result.contains("please help me"), "Should keep the concise form 'please' in place of 'Please kindly'");
@@ -296,6 +340,7 @@ mod tests {
             location: "text-wide".to_string(),
             pattern: "delete_me".to_string(),
             replacement: None,
+            delete_count: None,
         }];
         let result = apply_suggestions(text, &suggestions);
         assert_eq!(result, "keep this. . end.");
@@ -335,6 +380,73 @@ mod tests {
         // Header text is under the 30-char limit; no suggestion.
         let text = "## Short header\nbody";
         assert!(header_suggestion_for(text).is_none());
+    }
+
+    #[test]
+    fn test_apply_suggestions_keeps_one_duplicate_line() {
+        // Consecutive-duplicate suggestion should collapse N copies to
+        // exactly one, not zero. Previously `apply_suggestions` used
+        // `replace_all` even when `replacement: None`, which deleted every
+        // match — so "hello\nhello\nhello" became "" instead of "hello".
+        let text = "intro\nhello\nhello\nhello\noutro";
+        let suggestions = vec![Suggestion {
+            description: "Remove 2 duplicate consecutive line(s)".to_string(),
+            before_tokens: 2,
+            after_tokens: 0,
+            location: "line 2".to_string(),
+            pattern: "hello".to_string(),
+            replacement: None,
+            delete_count: Some(2),
+        }];
+        let result = apply_suggestions(text, &suggestions);
+        assert_eq!(
+            result.matches("hello").count(),
+            1,
+            "expected exactly one 'hello' to remain, got: {:?}",
+            result
+        );
+        assert!(result.starts_with("intro\n"), "intro line preserved");
+        assert!(result.ends_with("outro"), "outro line preserved");
+    }
+
+    #[test]
+    fn test_apply_suggestions_none_replacement_only_deletes_first_occurrence() {
+        // `replacement: None` should delete only the requested number of
+        // occurrences (default 1), not all of them — protects against
+        // accidentally swallowing repeated user content elsewhere in
+        // the prompt.
+        let text = "delete_me and keep delete_me here too";
+        let suggestions = vec![Suggestion {
+            description: "Remove noise".to_string(),
+            before_tokens: 1,
+            after_tokens: 0,
+            location: "text-wide".to_string(),
+            pattern: "delete_me".to_string(),
+            replacement: None,
+            delete_count: None,
+        }];
+        let result = apply_suggestions(text, &suggestions);
+        assert_eq!(result.matches("delete_me").count(), 1);
+        assert!(result.contains("and keep"));
+        assert!(result.contains("here too"));
+    }
+
+    #[test]
+    fn test_apply_suggestions_delete_count_stops_when_no_more_matches() {
+        // delete_count higher than the number of matches should delete
+        // every match and stop, not loop forever or panic.
+        let text = "only_one_here";
+        let suggestions = vec![Suggestion {
+            description: "Remove noise".to_string(),
+            before_tokens: 1,
+            after_tokens: 0,
+            location: "text-wide".to_string(),
+            pattern: "only_one_here".to_string(),
+            replacement: None,
+            delete_count: Some(5),
+        }];
+        let result = apply_suggestions(text, &suggestions);
+        assert!(result.is_empty(), "all matches removed, got: {:?}", result);
     }
 
     #[test]
