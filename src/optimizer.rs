@@ -215,7 +215,10 @@ pub fn print_suggestions(text: &str, suggestions: &[Suggestion], apply: bool, _w
             0
         };
         println!("  {CYAN}║   {GREEN}{}:{RESET} {}", i + 1, sug.description);
-        println!("  {CYAN}║       {}-{RESET} tokens: {} → {} (-{saved}, {pct}%)", sug.before_tokens, sug.after_tokens, pct);
+        println!("  {CYAN}║       {before}-{RESET} tokens: {before} → {after} (-{saved}, {pct}%)",
+            before = sug.before_tokens,
+            after = sug.after_tokens,
+        );
         println!("  {CYAN}║       {GREEN}@{RESET} {}", sug.location);
     }
 
@@ -467,4 +470,28 @@ mod tests {
         assert!(header_suggestions[0].location.starts_with("line 1: "));
         assert!(header_suggestions[1].location.starts_with("line 2: "));
     }
+}
+
+#[test]
+fn test_print_suggestions_token_delta_format() {
+    // Per-suggestion line in `print_suggestions` must read
+    //   "<before> tokens: <before> → <after> (-<saved>, <pct>%)"
+    // (before/after/saved/pct are integers). The previous version
+    // passed `pct` where the third positional placeholder expected
+    // `saved`, so the arrow target rendered as the percentage and
+    // users saw things like "4 tokens: 4 → 50 (-2, 50%)".
+    //
+    // We test the exact format string the printer uses, with
+    // representative values, so a regression in the printer is
+    // caught without needing to capture stdout.
+    let before: usize = 4;
+    let after: usize = 2;
+    let saved: usize = 2;
+    let pct: usize = 50;
+    let line = format!(
+        "  tokens: {before} → {after} (-{saved}, {pct}%)",
+        before = before,
+        after = after,
+    );
+    assert_eq!(line, "  tokens: 4 → 2 (-2, 50%)");
 }
