@@ -152,7 +152,11 @@ pub fn suggest(text: &str, _analysis: &AnalyzedPrompt) -> Vec<Suggestion> {
 }
 
 fn detect_long_example(text: &str) -> Option<(usize, usize, usize)> {
-    let markers = ["example:", "example:", "for example:", "e.g.", "such as:"];
+    // The list used to include `"example:"` twice. The second entry was
+    // a copy-paste duplicate: `find` returns the same byte position as
+    // the first, and `best` only keeps the longest block, so the
+    // duplicate added no coverage. Dropped.
+    let markers = ["example:", "for example:", "e.g.", "such as:"];
     let mut best: Option<(usize, usize, usize)> = None;
 
     for marker in markers {
@@ -494,4 +498,40 @@ fn test_print_suggestions_token_delta_format() {
         after = after,
     );
     assert_eq!(line, "  tokens: 4 → 2 (-2, 50%)");
+}
+
+#[test]
+fn test_detect_long_example_emits_single_suggestion_per_block() {
+    // `detect_long_example` is fed a marker list. If two markers match
+    // the same byte position (e.g. "example:" and a second "example:"
+    // copy), `find` returns the same offset twice and the `best` update
+    // is a no-op. The function should still emit exactly one
+    // "Move example block" suggestion per detected block, not one per
+    // matching marker.
+    //
+    // The block is intentionally over 200 chars to satisfy the
+    // long-example threshold, and the leading "for example:" prefix
+    // exercises the compound marker ("for example:") so a regression
+    // that drops the longer marker from the list would also be
+    // caught.
+    let body = "a".repeat(250);
+    let text = format!("for example: {body}\n\nrest of prompt");
+    let analysis = crate::analyzer::analyze(&text, "claude-3-5-sonnet");
+    let example_suggestions: Vec<_> = suggest(&text, &analysis)
+        .into_iter()
+        .filter(|s| s.description.starts_with("Move example block"))
+        .collect();
+    assert_eq!(
+        example_suggestions.len(),
+        1,
+        "expected exactly one example-block suggestion, got {:?}",
+        example_suggestions.iter().map(|s| &s.description).collect::<Vec<_>>()
+    );
+    // The detected block should start at the beginning of the
+    // "for example:" prefix, not somewhere inside it.
+    assert!(
+        example_suggestions[0].location.starts_with("chars 0-"),
+        "expected block to start at char 0, got location: {}",
+        example_suggestions[0].location
+    );
 }
