@@ -92,10 +92,25 @@ fn detect_layers(text: &str) -> Vec<Layer> {
     let tool_patterns = ["<tool>", "```tool", "<function>", "<tool_call>"];
     for pat in tool_patterns {
         if let Some(start) = text.find(pat) {
+            // Find the closing marker (`</tool>` is 7 bytes, ``` is 3)
+            // and advance `end` past it. For markdown fences we must
+            // skip past the opener first, otherwise `find("```")` would
+            // match the opening fence back to itself and `end` would
+            // land inside the opener. The previous implementation tried
+            // to infer which pattern matched from `text[start..]`'s
+            // prefix, which gave the right answer only when the opener
+            // happened to start with ```; for `<tool>...</tool>` it
+            // also worked by accident, but for `\`\`\`tool...\n``` ` it
+            // truncated the tool block to the three opening bytes.
             let end = text[start..]
                 .find("</tool>")
-                .or_else(|| text[start..].find("```"))
-                .map(|p| start + p + if text[start..].starts_with("```") { 3 } else { 7 })
+                .map(|p| (p, "</tool>".len()))
+                .or_else(|| {
+                    text[start + pat.len()..]
+                        .find("```")
+                        .map(|p| (p + pat.len(), "```".len()))
+                })
+                .map(|(p, len)| start + p + len)
                 .unwrap_or(text.len());
             let content = &text[start..end.min(text.len())];
             layers.push(Layer {
@@ -374,5 +389,57 @@ mod tests {
         text.push('é');
         text.push_str(&"b".repeat(200));
         visualize(&text, 80);
+    }
+
+    fn tool_layers(text: &str) -> Vec<Layer> {
+        analyze(text, "claude-3-5-sonnet")
+            .layers
+            .into_iter()
+            .filter(|l| matches!(l.layer_type, LayerType::Tool))
+            .collect()
+    }
+
+    #[test]
+    fn test_tool_layer_markdown_fence_covers_closing_fence() {
+        // Markdown code-fence tool block: ```tool ... ```. The detected
+        // tool layer must cover both the opening and closing fences, not
+        // just the first 3 bytes (the opening ``` itself). The previous
+        // implementation called `text[start..].find("```")` *without*
+        // skipping the opener, so `find` matched the opening fence and
+        // `end` was set to `start + 0 + 3 = start + 3` — truncating the
+        // tool block to the three bytes "```".
+        let text = "```tool\nfn search(q: &str) { }\n```\nuser question";
+        let tools = tool_layers(text);
+        assert_eq!(tools.len(), 1, "expected exactly one tool layer");
+        let layer = &tools[0];
+        assert!(
+            layer.content.contains("fn search"),
+            "tool layer must contain the tool body, got: {:?}",
+            layer.content
+        );
+        assert!(
+            layer.content.ends_with("```"),
+            "tool layer must extend to the closing fence, got: {:?}",
+            layer.content
+        );
+        // Token count should reflect the actual tool body, not the 3
+        // bytes of the opening fence.
+        assert!(
+            layer.tokens > 3,
+            "tool layer tokens should be more than 3 (just the opener), got {}",
+            layer.tokens
+        );
+    }
+
+    #[test]
+    fn test_tool_layer_xml_form_uses_correct_closing_offset() {
+        // XML form `<tool>...</tool>`. The closing `</tool>` is 7 bytes
+        // and the implementation must end *after* the closing tag, not
+        // at the byte just before it (which would chop the final `>`).
+        let text = "<tool>get_weather(city)</tool>";
+        let tools = tool_layers(text);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].content, text, "XML tool layer should span the full block");
+        assert_eq!(tools[0].end, text.len(), "end offset should be at the closing tag's end, not inside it");
     }
 }
