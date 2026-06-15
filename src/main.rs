@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::io::Read;
 
 mod tokenizer;
@@ -16,16 +16,30 @@ pub use diff::DiffResult;
 #[command(name = "prompt-lens")]
 #[command(about = "Visualize prompt structure, tokenize in real-time, and optimize token count", long_about = None)]
 struct Cli {
+    #[command(flatten)]
+    common: CommonArgs,
+
     #[command(subcommand)]
     command: Option<Commands>,
+}
 
+/// Flags that should be accepted at any level of the CLI — before the
+/// subcommand *and* after it. The README and the existing
+/// `prompt-lens analyze --model gpt-4o "Your prompt here"` example both
+/// rely on the post-subcommand form, which the previous top-level
+/// placement of `model`/`width` did not allow (clap rejected the
+/// positional prompt with "unexpected argument 'Your prompt here'
+/// found"). The `global = true` attribute is what makes clap accept the
+/// flag in either position.
+#[derive(Args)]
+struct CommonArgs {
     /// Model for cost calculation: claude-3-5-sonnet, gpt-4o, gpt-3.5-turbo.
     /// Falls back to `default_model` in `.prompt-lens.yaml` when omitted.
-    #[arg(long)]
+    #[arg(long, global = true)]
     model: Option<String>,
 
     /// Maximum characters per line in output
-    #[arg(long, default_value_t = 80)]
+    #[arg(long, default_value_t = 80, global = true)]
     width: usize,
 }
 
@@ -140,7 +154,8 @@ fn get_prompt_text(raw: String) -> String {
 
 fn main() {
     let cli = Cli::parse();
-    let model = resolve_model(cli.model);
+    let model = resolve_model(cli.common.model);
+    let width = cli.common.width;
 
     match cli.command {
         Some(Commands::Analyze { prompt, file, json }) => {
@@ -154,7 +169,7 @@ fn main() {
             if json {
                 println!("{}", serde_json::to_string_pretty(&analysis).unwrap());
             } else {
-                analyzer::print_analysis(&analysis, cli.width);
+                analyzer::print_analysis(&analysis, width);
             }
         }
 
@@ -165,7 +180,7 @@ fn main() {
                 eprintln!("Error: no content to visualize");
                 std::process::exit(1);
             }
-            analyzer::visualize(&text, cli.width);
+            analyzer::visualize(&text, width);
         }
 
         Some(Commands::Optimize { prompt, file, apply, json }) => {
@@ -180,7 +195,7 @@ fn main() {
             if json {
                 println!("{}", serde_json::to_string_pretty(&suggestions).unwrap());
             } else {
-                optimizer::print_suggestions(&text, &suggestions, apply, cli.width);
+                optimizer::print_suggestions(&text, &suggestions, apply, width);
             }
         }
 
@@ -199,7 +214,7 @@ fn main() {
             if json {
                 println!("{}", serde_json::to_string_pretty(&diff).unwrap());
             } else {
-                diff::print_diff(&diff, cli.width);
+                diff::print_diff(&diff, width);
             }
         }
 
@@ -216,8 +231,103 @@ fn main() {
                 Cli::parse();
             } else {
                 let analysis = analyzer::analyze(text, &model);
-                analyzer::print_analysis(&analysis, cli.width);
+                analyzer::print_analysis(&analysis, width);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cli_flag_placement_tests {
+    use super::*;
+
+    // The README and the example in `prompt-lens analyze --model gpt-4o
+    // "Your prompt here"` rely on `--model` being accepted *after* the
+    // subcommand keyword. The previous top-level placement of the
+    // `model` and `width` fields made clap reject the trailing
+    // positional prompt with "unexpected argument ... found". The
+    // `CommonArgs` flatten + `global = true` fix is what makes the
+    // post-subcommand form parse cleanly. These tests pin both
+    // placements so a future refactor can't silently break the
+    // documented invocation order.
+    //
+    // We exercise `Cli::try_parse_from` directly rather than running
+    // the binary, so the tests stay fast and don't print to a real TTY.
+
+    fn model_from(args: &[&str]) -> Option<String> {
+        let cli = Cli::try_parse_from(args).expect("CLI should parse");
+        cli.common.model
+    }
+
+    fn width_from(args: &[&str]) -> usize {
+        let cli = Cli::try_parse_from(args).expect("CLI should parse");
+        cli.common.width
+    }
+
+    #[test]
+    fn model_flag_accepted_after_subcommand() {
+        // Documented form: `prompt-lens analyze --model gpt-4o "..."`.
+        // This regressed when `model` lived on the top-level `Cli`
+        // struct because clap expected the positional prompt before
+        // any subcommand-level flag.
+        assert_eq!(
+            model_from(&["prompt-lens", "analyze", "--model", "gpt-4o", "Hello"]),
+            Some("gpt-4o".to_string())
+        );
+    }
+
+    #[test]
+    fn model_flag_accepted_before_subcommand() {
+        // Pre-subcommand form, which worked before the fix and must
+        // keep working after it.
+        assert_eq!(
+            model_from(&["prompt-lens", "--model", "gpt-4o", "analyze", "Hello"]),
+            Some("gpt-4o".to_string())
+        );
+    }
+
+    #[test]
+    fn model_flag_equals_form_accepted_after_subcommand() {
+        // `--model=gpt-4o` is the form clap recommends for flag+value
+        // pairs that share a token. Same constraint as
+        // model_flag_accepted_after_subcommand.
+        assert_eq!(
+            model_from(&["prompt-lens", "analyze", "--model=gpt-4o", "Hello"]),
+            Some("gpt-4o".to_string())
+        );
+    }
+
+    #[test]
+    fn width_flag_accepted_after_subcommand_with_default_otherwise() {
+        // The previous placement only let `--width` come before the
+        // subcommand. Pin both that the post-subcommand form parses
+        // and that the default (80) is preserved when the flag is
+        // omitted.
+        assert_eq!(
+            width_from(&["prompt-lens", "analyze", "--width", "100", "Hello"]),
+            100
+        );
+        assert_eq!(
+            width_from(&["prompt-lens", "analyze", "Hello"]),
+            80
+        );
+    }
+
+    #[test]
+    fn model_flag_after_optimize_subcommand_also_parses() {
+        // The bug affected every subcommand that has a positional
+        // prompt, not just `analyze`. Pin `optimize` so a future
+        // subcommand-only fix (e.g. moving the flag onto one
+        // subcommand) doesn't regress the others.
+        assert_eq!(
+            model_from(&[
+                "prompt-lens",
+                "optimize",
+                "--model",
+                "claude-3-5-sonnet",
+                "Hello"
+            ]),
+            Some("claude-3-5-sonnet".to_string())
+        );
     }
 }
