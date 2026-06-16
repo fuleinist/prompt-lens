@@ -219,10 +219,7 @@ pub fn print_suggestions(text: &str, suggestions: &[Suggestion], apply: bool, _w
             0
         };
         println!("  {CYAN}║   {GREEN}{}:{RESET} {}", i + 1, sug.description);
-        println!("  {CYAN}║       {before}-{RESET} tokens: {before} → {after} (-{saved}, {pct}%)",
-            before = sug.before_tokens,
-            after = sug.after_tokens,
-        );
+        println!("  {CYAN}║       {}{RESET}", format_token_delta_line(sug.before_tokens, sug.after_tokens, saved, pct));
         println!("  {CYAN}║       {GREEN}@{RESET} {}", sug.location);
     }
 
@@ -237,6 +234,21 @@ pub fn print_suggestions(text: &str, suggestions: &[Suggestion], apply: bool, _w
         println!("{BOLD}Optimized prompt:{RESET}");
         println!("{}", optimized);
     }
+}
+
+/// Format the per-suggestion token-delta line. Extracted from
+/// `print_suggestions` so the format string is testable in
+/// isolation. Output must read exactly
+/// `"  tokens: <before> → <after> (-<saved>, <pct>%)"` — no
+/// leading "N-" prefix (a regression from an earlier refactor
+/// rendered the line as "4- tokens: 4 → 2 (-2, 50%)", which
+/// looked broken).
+fn format_token_delta_line(before: usize, after: usize, saved: usize, pct: usize) -> String {
+    format!(
+        "  tokens: {before} → {after} (-{saved}, {pct}%)",
+        before = before,
+        after = after,
+    )
 }
 
 fn apply_suggestions(text: &str, suggestions: &[Suggestion]) -> String {
@@ -479,7 +491,7 @@ mod tests {
 #[test]
 fn test_print_suggestions_token_delta_format() {
     // Per-suggestion line in `print_suggestions` must read
-    //   "<before> tokens: <before> → <after> (-<saved>, <pct>%)"
+    //   "tokens: <before> → <after> (-<saved>, <pct>%)"
     // (before/after/saved/pct are integers). The previous version
     // passed `pct` where the third positional placeholder expected
     // `saved`, so the arrow target rendered as the percentage and
@@ -492,12 +504,33 @@ fn test_print_suggestions_token_delta_format() {
     let after: usize = 2;
     let saved: usize = 2;
     let pct: usize = 50;
-    let line = format!(
-        "  tokens: {before} → {after} (-{saved}, {pct}%)",
-        before = before,
-        after = after,
-    );
+    let line = format_token_delta_line(before, after, saved, pct);
     assert_eq!(line, "  tokens: 4 → 2 (-2, 50%)");
+}
+
+#[test]
+fn test_format_token_delta_line_no_broken_prefix() {
+    // Regression: the per-suggestion token-delta line in
+    // `print_suggestions` used to be
+    //   `║       {before}-{RESET} tokens: {before} → {after} ...`
+    // which rendered as `║       4- tokens: 4 → 2 (-2, 50%)` —
+    // a stray "N-" prefix followed by a color reset that made
+    // the line look broken. The line must start with the literal
+    // "  tokens: " (two leading spaces, then "tokens:"), with no
+    // leading digit or dash.
+    let line = format_token_delta_line(4, 2, 2, 50);
+    assert!(
+        line.starts_with("  tokens: "),
+        "line must start with `  tokens: `, got: {line:?}"
+    );
+    // Cross-check the full expected string.
+    assert_eq!(line, "  tokens: 4 → 2 (-2, 50%)");
+
+    // Spot-check a different shape: a polite-phrase rewrite that
+    // actually saves 5 of 7 tokens, so the line exercises a
+    // non-rounded percentage.
+    let line2 = format_token_delta_line(7, 2, 5, 71);
+    assert_eq!(line2, "  tokens: 7 → 2 (-5, 71%)");
 }
 
 #[test]
