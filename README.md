@@ -16,6 +16,7 @@ prompt-lens analyze "your prompt here"   # Main analysis: token count, cost, str
 prompt-lens visualize "your prompt"     # Color-coded layer breakdown
 prompt-lens optimize "your prompt"     # Suggest token-saving transformations
 prompt-lens diff <p1> <p2>              # Compare two prompts
+prompt-lens models                       # List supported models with cost & context
 prompt-lens init                         # Create .prompt-lens.yaml config
 ```
 
@@ -39,13 +40,17 @@ prompt-lens diff "Do X" "Please do X"
 
 # Show cost estimate
 prompt-lens analyze --model gpt-4o "Your prompt here"
+
+# List supported models with cost & context window
+prompt-lens models
+prompt-lens models --json
 ```
 
 ## Options
 
-- `--model` — Model for cost calculation (claude-3-5-sonnet, gpt-4o, gpt-3.5-turbo)
+- `--model` — Model for cost calculation (run `prompt-lens models` for the full list)
 - `--width` — Max characters per line (default: 80)
-- `--json` — Output as JSON (for analyze, optimize, diff)
+- `--json` — Output as JSON (for analyze, optimize, diff, models)
 
 ## License
 

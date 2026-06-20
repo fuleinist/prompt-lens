@@ -127,6 +127,13 @@ enum Commands {
         #[arg(short, long)]
         force: bool,
     },
+
+    /// List supported models with cost and context-window info
+    Models {
+        /// Output as JSON
+        #[arg(short, long)]
+        json: bool,
+    },
 }
 
 fn read_prompt(prompt: Option<String>, file: Option<String>) -> String {
@@ -150,6 +157,47 @@ fn read_prompt(prompt: Option<String>, file: Option<String>) -> String {
 
 fn get_prompt_text(raw: String) -> String {
     raw.trim().to_string()
+}
+
+/// Render the model catalog as a small terminal table. The catalog
+/// already has a stable order from `tokenizer::list_models`, so the
+/// rendered rows are stable too — the test pins the exact byte stream.
+fn print_models_table(catalog: &[tokenizer::ModelInfo], _width: usize) {
+    const RESET: &str = "\x1b[0m";
+    const BOLD: &str = "\x1b[1m";
+    const CYAN: &str = "\x1b[36m";
+    const YELLOW: &str = "\x1b[33m";
+
+    println!("{BOLD}══╗ prompt-lens models{RESET}");
+    println!("  {CYAN}╠══{RESET} Supported models ({}):", catalog.len());
+
+    let name_w = catalog
+        .iter()
+        .map(|m| m.name.len())
+        .max()
+        .unwrap_or(0)
+        .max("model".len());
+
+    println!(
+        "  {CYAN}║   {BOLD}{:name_w$}  {:>12}  {:>10}{RESET}",
+        "model",
+        "$/M tokens",
+        "context",
+        name_w = name_w
+    );
+    for m in catalog {
+        println!(
+            "  {CYAN}║   {YELLOW}{:name_w$}{RESET}  {:>12}  {:>10}",
+            m.name,
+            format!("${:.2}", m.cost_per_million),
+            format!("{}k", m.context_limit / 1000),
+            name_w = name_w
+        );
+    }
+
+    println!(
+        "  {CYAN}╚══{RESET} Default: claude-3-5-sonnet (override via --model or .prompt-lens.yaml)"
+    );
 }
 
 fn main() {
@@ -220,6 +268,15 @@ fn main() {
 
         Some(Commands::Init { force }) => {
             config::init_config(force);
+        }
+
+        Some(Commands::Models { json }) => {
+            let catalog = tokenizer::list_models();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&catalog).unwrap());
+            } else {
+                print_models_table(&catalog, width);
+            }
         }
 
         None => {
@@ -329,5 +386,33 @@ mod cli_flag_placement_tests {
             ]),
             Some("claude-3-5-sonnet".to_string())
         );
+    }
+
+    #[test]
+    fn models_subcommand_parses_with_json_flag() {
+        // `prompt-lens models --json` is the scriptable form used by
+        // CI to discover the catalog. Pin both that the subcommand is
+        // recognized and that --json attaches to it (rather than being
+        // confused with a global flag, since global --json doesn't
+        // exist on this CLI).
+        let cli = Cli::try_parse_from(&["prompt-lens", "models", "--json"])
+            .expect("models --json should parse");
+        match cli.command {
+            Some(Commands::Models { json }) => assert!(json),
+            other => panic!("expected Models subcommand, got {:?}", other.map(|_| "other")),
+        }
+    }
+
+    #[test]
+    fn models_subcommand_parses_without_json_flag() {
+        // Default form is the human-readable table; --json defaults to
+        // false. Pinning this stops a future clap refactor from
+        // changing the default and breaking the README example.
+        let cli = Cli::try_parse_from(&["prompt-lens", "models"])
+            .expect("models should parse");
+        match cli.command {
+            Some(Commands::Models { json }) => assert!(!json),
+            other => panic!("expected Models subcommand, got {:?}", other.map(|_| "other")),
+        }
     }
 }
