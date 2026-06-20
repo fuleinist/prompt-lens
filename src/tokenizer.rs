@@ -118,34 +118,65 @@ fn estimate_word_tokens(chars: usize) -> usize {
     }
 }
 
+/// Catalog entry for one supported model. Cost is input USD per 1M tokens
+/// (the only side prompt-lens can quote — output tokens are billed by the
+/// provider but are not counted here). The `aliases` list lets older or
+/// fully-qualified names resolve to the same entry, matching the previous
+/// `cost_per_token` / `context_limit` behavior (e.g. `claude-3-5-sonnet`
+/// and `claude-3-5-sonnet-2024-05-20` share pricing).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModelInfo {
+    pub name: &'static str,
+    #[serde(skip_serializing)]
+    pub aliases: &'static [&'static str],
+    pub cost_per_million: f64,
+    pub context_limit: usize,
+}
+
+const MODELS: &[ModelInfo] = &[
+    ModelInfo { name: "claude-3-5-sonnet",  aliases: &["claude-3-5-sonnet-2024-05-20"], cost_per_million: 3.00,  context_limit: 200_000 },
+    ModelInfo { name: "claude-3-opus",     aliases: &[],                                cost_per_million: 15.00, context_limit: 200_000 },
+    ModelInfo { name: "claude-3-sonnet",   aliases: &[],                                cost_per_million: 3.00,  context_limit: 200_000 },
+    ModelInfo { name: "claude-3-haiku",    aliases: &[],                                cost_per_million: 0.25,  context_limit: 200_000 },
+    ModelInfo { name: "gpt-4o",            aliases: &[],                                cost_per_million: 2.50,  context_limit: 128_000 },
+    ModelInfo { name: "gpt-4o-mini",       aliases: &[],                                cost_per_million: 0.15,  context_limit: 128_000 },
+    ModelInfo { name: "gpt-4-turbo",       aliases: &["gpt-4"],                          cost_per_million: 10.00, context_limit: 128_000 },
+    ModelInfo { name: "gpt-3.5-turbo",     aliases: &[],                                cost_per_million: 0.50,  context_limit:  16_385 },
+];
+
+/// Look up a model by primary name or alias. Returns the canonical entry
+/// so callers see the primary `name`, not the alias they typed.
+fn lookup_model(model: &str) -> Option<&'static ModelInfo> {
+    MODELS.iter().find(|m| m.name == model || m.aliases.contains(&model))
+}
+
+/// The built-in fallback used when a model name is not in the catalog.
+/// Matches the previous `_ => 3.0 / 1_000_000.0` default in
+/// `cost_per_token` and `_ => 200_000` in `context_limit`.
+const DEFAULT_MODEL: &str = "claude-3-5-sonnet";
+
 /// Calculate cost per token for a given model.
 pub fn cost_per_token(model: &str) -> f64 {
-    match model {
-        "claude-3-5-sonnet" | "claude-3-5-sonnet-2024-05-20" => {
-            // $3.00 / 1M input tokens = $0.000003
-            3.0 / 1_000_000.0
-        }
-        "gpt-4o" => 2.5 / 1_000_000.0,          // $2.50 / 1M
-        "gpt-4o-mini" => 0.15 / 1_000_000.0,    // $0.15 / 1M
-        "gpt-4-turbo" => 10.0 / 1_000_000.0,    // $10 / 1M
-        "gpt-3.5-turbo" => 0.5 / 1_000_000.0,  // $0.50 / 1M
-        _ => 3.0 / 1_000_000.0, // Default to Claude pricing
-    }
+    let entry = lookup_model(model).unwrap_or_else(|| {
+        // Safe: DEFAULT_MODEL is in the catalog.
+        lookup_model(DEFAULT_MODEL).expect("default model must be in MODELS")
+    });
+    entry.cost_per_million / 1_000_000.0
 }
 
 /// Context window limits by model.
 pub fn context_limit(model: &str) -> usize {
-    match model {
-        "claude-3-5-sonnet" | "claude-3-5-sonnet-2024-05-20" => 200_000,
-        "claude-3-opus" => 200_000,
-        "claude-3-sonnet" => 200_000,
-        "claude-3-haiku" => 200_000,
-        "gpt-4o" => 128_000,
-        "gpt-4-turbo" => 128_000,
-        "gpt-4" => 128_000,
-        "gpt-3.5-turbo" => 16_385,
-        _ => 200_000,
-    }
+    let entry = lookup_model(model).unwrap_or_else(|| {
+        lookup_model(DEFAULT_MODEL).expect("default model must be in MODELS")
+    });
+    entry.context_limit
+}
+
+/// Return the catalog of supported models for the `models` subcommand and
+/// any future programmatic consumers. Order matches the `MODELS` table so
+/// the rendered table is stable across runs.
+pub fn list_models() -> Vec<ModelInfo> {
+    MODELS.to_vec()
 }
 
 #[cfg(test)]
@@ -190,5 +221,69 @@ mod tests {
         // Longer words (11+ chars) may be 3+ tokens
         // "development" has 12 chars = 3 tokens in BPE split
         assert_eq!(count_tokens("development", "claude-3-5-sonnet"), 3);
+    }
+
+    #[test]
+    fn test_cost_per_token_matches_previous_constants() {
+        // The catalog refactor must not change the numbers anyone saw
+        // before — pin the per-token cost for every catalog entry so a
+        // future edit to MODELS can't silently move the decimal.
+        assert_eq!(cost_per_token("claude-3-5-sonnet"), 3.0 / 1_000_000.0);
+        assert_eq!(cost_per_token("claude-3-5-sonnet-2024-05-20"), 3.0 / 1_000_000.0);
+        assert_eq!(cost_per_token("gpt-4o"), 2.5 / 1_000_000.0);
+        assert_eq!(cost_per_token("gpt-4o-mini"), 0.15 / 1_000_000.0);
+        assert_eq!(cost_per_token("gpt-4-turbo"), 10.0 / 1_000_000.0);
+        assert_eq!(cost_per_token("gpt-4"), 10.0 / 1_000_000.0);
+        assert_eq!(cost_per_token("gpt-3.5-turbo"), 0.5 / 1_000_000.0);
+        // Unknown model still falls back to Claude Sonnet pricing, same
+        // as the old `_ => 3.0 / 1_000_000.0` arm.
+        assert_eq!(cost_per_token("totally-unknown-model"), 3.0 / 1_000_000.0);
+    }
+
+    #[test]
+    fn test_context_limit_matches_previous_constants() {
+        // Same shape as the cost test: every catalog entry plus the
+        // unknown-model fallback must report the same context limit it
+        // did before the catalog refactor.
+        assert_eq!(context_limit("claude-3-5-sonnet"), 200_000);
+        assert_eq!(context_limit("claude-3-opus"), 200_000);
+        assert_eq!(context_limit("claude-3-sonnet"), 200_000);
+        assert_eq!(context_limit("claude-3-haiku"), 200_000);
+        assert_eq!(context_limit("gpt-4o"), 128_000);
+        assert_eq!(context_limit("gpt-4-turbo"), 128_000);
+        assert_eq!(context_limit("gpt-4"), 128_000);
+        assert_eq!(context_limit("gpt-3.5-turbo"), 16_385);
+        assert_eq!(context_limit("totally-unknown-model"), 200_000);
+    }
+
+    #[test]
+    fn test_list_models_returns_catalog_in_order() {
+        // `models` subcommand prints the catalog in this order, so
+        // downstream tooling that diffs the output stays stable.
+        let catalog = list_models();
+        let names: Vec<&str> = catalog.iter().map(|m| m.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "claude-3-5-sonnet",
+                "claude-3-opus",
+                "claude-3-sonnet",
+                "claude-3-haiku",
+                "gpt-4o",
+                "gpt-4o-mini",
+                "gpt-4-turbo",
+                "gpt-3.5-turbo",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_list_models_includes_required_fields() {
+        // The subcommand prints cost and context; every entry must have
+        // both, otherwise the renderer would print "—" or panic.
+        for m in list_models() {
+            assert!(m.cost_per_million > 0.0, "{} missing cost", m.name);
+            assert!(m.context_limit > 0, "{} missing context_limit", m.name);
+        }
     }
 }
