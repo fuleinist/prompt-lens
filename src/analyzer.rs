@@ -277,7 +277,16 @@ fn detect_line_layer(line: &str) -> LayerType {
     let trimmed = line.trim();
     if trimmed.starts_with('#') {
         LayerType::Section
-    } else if trimmed.starts_with("<system") || trimmed.starts_with("[SYSTEM]") {
+    } else if trimmed.starts_with("<system")
+        || trimmed.starts_with("[SYSTEM]")
+        // Mirror `detect_layers`'s third system-pattern entry so the
+        // visualizer colours ChatML/Llama-2-chat `<|system|>` lines as
+        // System instead of falling through to User. Previously these
+        // lines were painted green even though `analyze` reported them
+        // as a System layer, making `visualize` inconsistent with
+        // `analyze`.
+        || trimmed.starts_with("<|system|>")
+    {
         LayerType::System
     } else if trimmed.starts_with("<tool") || trimmed.starts_with("```tool") {
         LayerType::Tool
@@ -441,5 +450,30 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].content, text, "XML tool layer should span the full block");
         assert_eq!(tools[0].end, text.len(), "end offset should be at the closing tag's end, not inside it");
+    }
+
+    #[test]
+    fn test_detect_line_layer_chatml_system_marker() {
+        // `detect_layers` already recognises `<|system|>` as a System
+        // layer (Llama-2-chat / ChatML). `detect_line_layer` (used by
+        // `visualize`) used to only check `<system` and `[SYSTEM]`,
+        // so a line starting with `<|system|>` was painted User
+        // instead of System — the visualizer disagreed with the
+        // analyzer. Pin that the visualizer's per-line detector now
+        // recognises the marker too.
+        assert!(matches!(
+            detect_line_layer("<|system|>You are a helpful assistant."),
+            LayerType::System
+        ));
+        // Leading whitespace must not defeat the match.
+        assert!(matches!(
+            detect_line_layer("   <|system|>You are a helpful assistant."),
+            LayerType::System
+        ));
+        // Plain prose still falls through to User.
+        assert!(matches!(
+            detect_line_layer("Hello there"),
+            LayerType::User
+        ));
     }
 }
