@@ -7,7 +7,7 @@ mod optimizer;
 mod diff;
 mod config;
 
-pub use tokenizer::count_tokens;
+pub use tokenizer::{count_tokens, using_real_tokenizer};
 pub use analyzer::{AnalyzedPrompt, Layer};
 pub use optimizer::Suggestion;
 pub use diff::DiffResult;

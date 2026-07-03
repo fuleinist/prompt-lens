@@ -1,6 +1,12 @@
-//! # Tokenizer — cl100k_base approximation
+//! # Tokenizer — cl100k_base token counting
 //!
-//! Uses word-level token estimation calibrated to OpenAI's cl100k_base tokenizer:
+//! Two backends:
+//! - **tiktoken-rs** (feature `tiktoken`): calls the real OpenAI BPE tokenizer
+//!   via Rust bindings. Accurate counts matching API billing.
+//! - **Heuristic** (fallback): word-level estimation calibrated to cl100k_base.
+//!   Zero dependencies, fast, but approximate.
+//!
+//! The heuristic uses these rules:
 //! - Very short words (1-2 chars): often merged with next token → 1 token each
 //! - Short words (3-4 chars): 1-2 tokens typically
 //! - Medium words (5-8 chars): 2-3 tokens (may split at common subword boundaries)
@@ -9,8 +15,62 @@
 //! - Punctuation: 1 token each
 //! - Whitespace: merged, no token cost
 
-/// Count tokens using cl100k_base approximation rules.
-pub fn count_tokens(text: &str, _model: &str) -> usize {
+#[cfg(feature = "tiktoken")]
+use std::sync::OnceLock;
+
+/// Returns `true` when the active tokenizer is the real tiktoken BPE
+/// rather than the heuristic approximation.
+pub fn using_real_tokenizer() -> bool {
+    #[cfg(feature = "tiktoken")]
+    {
+        true
+    }
+    #[cfg(not(feature = "tiktoken"))]
+    {
+        false
+    }
+}
+
+/// Map prompt-lens model names to tiktoken-rs model names.
+/// Returns `None` when the model is not in tiktoken's registry.
+#[cfg(feature = "tiktoken")]
+fn tiktoken_model_name(model: &str) -> Option<&'static str> {
+    match model {
+        "gpt-4o" => Some("gpt-4o"),
+        "gpt-4o-mini" => Some("gpt-4o-mini"),
+        "gpt-4-turbo" => Some("gpt-4-turbo"),
+        "gpt-4" => Some("gpt-4"),
+        "gpt-3.5-turbo" => Some("gpt-3.5-turbo"),
+        // claude models → fallback
+        _ => None,
+    }
+}
+
+/// Thread-local (via OnceLock) cached tiktoken tokenizer instance.
+#[cfg(feature = "tiktoken")]
+fn get_tiktoken(model: &str) -> Option<&'static tiktoken_rs::CoreBPE> {
+    static CACHE: OnceLock<tiktoken_rs::CoreBPE> = OnceLock::new();
+    let tk_model = tiktoken_model_name(model)?;
+    let bpe = CACHE.get_or_init(|| {
+        tiktoken_rs::get_bpe_from_model(tk_model)
+            .expect("tiktoken-rs should provide a valid BPE for known models")
+    });
+    Some(bpe)
+}
+
+/// Count tokens using the best available backend.
+///
+/// When the `tiktoken` feature is enabled and the model is in tiktoken's
+/// registry, uses the real BPE tokenizer. Otherwise falls back to the
+/// heuristic approximation.
+pub fn count_tokens(text: &str, model: &str) -> usize {
+    #[cfg(feature = "tiktoken")]
+    {
+        if let Some(bpe) = get_tiktoken(model) {
+            return bpe.encode_with_special_tokens(text).len();
+        }
+    }
+    let _ = model;
     count_tokens_raw(text)
 }
 

@@ -34,6 +34,7 @@ pub struct AnalyzedPrompt {
     #[serde(skip)]
     pub costly_sections: Vec<(usize, usize, usize)>, // (start_line, end_line, tokens)
     pub model: String,
+    pub tokenizer: String,  // "tiktoken" or "heuristic"
 }
 
 pub fn analyze(text: &str, model: &str) -> AnalyzedPrompt {
@@ -49,6 +50,8 @@ pub fn analyze(text: &str, model: &str) -> AnalyzedPrompt {
     let tables = count_tables(text);
     let costly = find_costly_sections(&lines, &layers, total_tokens);
 
+    let tokenizer = if crate::tokenizer::using_real_tokenizer() { "tiktoken" } else { "heuristic" };
+
     AnalyzedPrompt {
         tokens: total_tokens,
         cost,
@@ -61,6 +64,7 @@ pub fn analyze(text: &str, model: &str) -> AnalyzedPrompt {
         lines: lines.len(),
         costly_sections: costly,
         model: model.to_string(),
+        tokenizer: tokenizer.to_string(),
     }
 }
 
@@ -307,7 +311,8 @@ pub fn print_analysis(a: &AnalyzedPrompt, _width: usize) {
 
     // Input summary
     let cost_str = format!("${:.4}", a.cost);
-    println!("  {CYAN}╠══{RESET} Input: {} tokens | {cost_str} (@ {})", a.tokens, a.model);
+    let tk_label = if a.tokenizer == "tiktoken" { "tiktoken" } else { "heuristic" };
+    println!("  {CYAN}╠══{RESET} Input: {} tokens | {cost_str} (@ {}) [{tk_label}]", a.tokens, a.model);
     let pct = (a.context_used * 100.0).round() as usize;
     let limit_k = a.context_limit / 1000;
     let used_k = (a.tokens as f64 / 1000.0).round() as usize;
@@ -354,7 +359,7 @@ pub fn print_analysis(a: &AnalyzedPrompt, _width: usize) {
         }
     }
 
-    println!("  {CYAN}╚══{RESET} {BOLD}Total: {} tokens | ${:.4}{RESET}", a.tokens, a.cost);
+    println!("  {CYAN}╚══{RESET} {BOLD}Total: {} tokens | ${:.4} | tokenizer: {}{RESET}", a.tokens, a.cost, a.tokenizer);
 }
 
 #[cfg(test)]
